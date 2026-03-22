@@ -560,9 +560,13 @@ function renderPlayers(){
 function renderDisc(){
   const c=document.getElementById('discChips'); c.innerHTML='';
   (GS.discardPile||[]).forEach(d=>{
-    const card=getCard(d.cardId),el=document.createElement('div');
+    // Look up by value for accurate display — cardId can be mismatched for shot/mimic entries
+    const card=CARDS.find(c=>c.value===d.value)||getCard(d.cardId);
+    if(!card) return;
+    const el=document.createElement('div');
     el.className='dchip'+(d.value===7||d.value===11?' hi':'');
-    el.textContent=`${card.value} ${card.name}`; el.title=`by ${d.playedBy}`;
+    el.textContent=`${card.value} ${card.icon} ${card.name}`;
+    el.title=`by ${d.playedBy}`;
     c.appendChild(el);
   });
 }
@@ -583,11 +587,15 @@ function makeCard(card,idx){
   d.className='card'+(GS.selectedCardIdx===idx?' sel':'');
   d.innerHTML=`<div class="cv">${card.value}</div>${idx===1?'<div class="cnew">NEW</div>':''}<div class="ci">${card.icon}</div><div class="cn">${card.name}</div><div class="cvbr">${card.value}</div>`;
   d.addEventListener('mouseenter',e=>showTT(card,e));
-  d.addEventListener('mouseleave',()=>document.getElementById('ctt').classList.remove('vis'));
-  d.addEventListener('mousemove',e=>{const tt=document.getElementById('ctt');let x=e.clientX+13,y=e.clientY-9;if(x+210>window.innerWidth)x=e.clientX-220;if(y+180>window.innerHeight)y=e.clientY-185;tt.style.left=x+'px';tt.style.top=y+'px';});
+  d.addEventListener('mouseleave',hideTT);
+  // Hide tooltip immediately on any click or touch so it never blocks the UI
+  d.addEventListener('mousedown',hideTT);
+  d.addEventListener('touchstart',hideTT,{passive:true});
+  d.addEventListener('mousemove',e=>{const tt=document.getElementById('ctt');let x=e.clientX+13,y=e.clientY-9;if(x+220>window.innerWidth)x=e.clientX-230;if(y+190>window.innerHeight)y=e.clientY-195;tt.style.left=x+'px';tt.style.top=y+'px';});
   return d;
 }
 function showTT(c){document.getElementById('ttn').textContent=`${c.value} — ${c.name} / ${c.nameCN}`;document.getElementById('ttv').textContent=`Value: ${c.value} · ×${c.count}`;document.getElementById('ttd').textContent=c.desc;document.getElementById('ttcn').textContent=c.descCN;document.getElementById('ctt').classList.add('vis');}
+function hideTT(){document.getElementById('ctt').classList.remove('vis');}
 
 // ─── TURN FLOW (host runs logic, writes to Firebase) ─────────────────────────
 function beginTurn(){
@@ -649,7 +657,7 @@ function buildConfUI(card,idx){
 function initiatePlay(card,idx){
   if([1,2,3,5,7,10].includes(card.value)) showTargetUI(card,idx);
   else if(card.value===9) showMimicUI(card,idx);
-  else commitPlay({card,idx,targetId:null,guessValue:null});
+  else commitPlay({card,idx,targetId:null,guessValue:null,mimicId:null});
 }
 
 function validTargets(){return (GS.players||[]).filter(p=>!p.eliminated&&p.id!==myId&&!p.protected);}
@@ -693,22 +701,82 @@ function showGuessUI(card,idx,tid){
   div.appendChild(cf); showAP('Detector: Guess / 偵探：猜測',div);
 }
 
-function showMimicUI(card,idx){
-  const ap=[...new Set((GS.discardPile||[]).map(d=>d.cardId))];
+function showMimicUI(mimicCard,mimicIdx){
+  const ap=[...new Set((GS.discardPile||[]).map(d=>d.value))];
   if(!ap.length){toast('No discarded cards yet / 尚無棄牌','red');return;}
   const div=document.createElement('div');
   div.innerHTML=`<div class="ttitle">Copy which card? / 模仿哪張牌？</div>`;
   const list=document.createElement('div'); list.className='tlist';
-  ap.forEach(cid=>{
-    const c=getCard(cid); const b=document.createElement('button'); b.className='tbtn';
+  ap.forEach(val=>{
+    const c=CARDS.find(x=>x.value===val); if(!c) return;
+    const b=document.createElement('button'); b.className='tbtn';
     b.innerHTML=`<span style="font-family:'Cinzel Decorative',serif;color:var(--gold)">${c.value}</span><span>${c.icon} ${c.name} / ${c.nameCN}</span>`;
-    b.onclick=()=>commitPlay({card,idx,targetId:null,guessValue:null,mimicId:cid});
+    b.onclick=()=>{
+      // Cards that need a target
+      if([1,2,3,5,7,10].includes(c.value)){
+        showMimicTargetUI(mimicCard,mimicIdx,c);
+      } else {
+        // No target needed — commit immediately
+        commitPlay({card:mimicCard,idx:mimicIdx,targetId:null,guessValue:null,mimicId:c.id});
+      }
+    };
     list.appendChild(b);
   });
   div.appendChild(list);
   const bk=document.createElement('button'); bk.className='btn btn-outline btn-sm mt8'; bk.textContent='← Back / 返回';
-  bk.onclick=()=>pickCard(idx); div.appendChild(bk);
+  bk.onclick=()=>pickCard(mimicIdx); div.appendChild(bk);
   showAP('Mimic / 模仿者',div);
+}
+
+// Mimic: pick target for the copied card
+function showMimicTargetUI(mimicCard,mimicIdx,copiedCard){
+  const tgts=validTargets();
+  const div=document.createElement('div');
+  div.innerHTML=`<div class="ttitle">Mimic → ${copiedCard.name}: choose target / 模仿→選擇目標</div>`;
+  const list=document.createElement('div'); list.className='tlist';
+  if(!tgts.length){
+    list.innerHTML='<div class="dim" style="font-size:14px">No valid targets — effect skipped / 無有效目標</div>';
+    const sk=document.createElement('button'); sk.className='btn btn-outline mt8'; sk.textContent='Skip / 跳過';
+    sk.onclick=()=>commitPlay({card:mimicCard,idx:mimicIdx,targetId:null,guessValue:null,mimicId:copiedCard.id});
+    div.appendChild(list); div.appendChild(sk);
+  } else {
+    tgts.forEach(p=>{
+      const b=document.createElement('button'); b.className='tbtn';
+      b.innerHTML=`<span>${p.name[0]}</span><span>${p.name}</span>`;
+      b.onclick=()=>{
+        if(copiedCard.value===1){
+          // Detector needs a guess too
+          showMimicGuessUI(mimicCard,mimicIdx,copiedCard,p.id);
+        } else {
+          commitPlay({card:mimicCard,idx:mimicIdx,targetId:p.id,guessValue:null,mimicId:copiedCard.id});
+        }
+      };
+      list.appendChild(b);
+    });
+    div.appendChild(list);
+    const bk=document.createElement('button'); bk.className='btn btn-outline btn-sm mt8'; bk.textContent='← Back / 返回';
+    bk.onclick=()=>showMimicUI(mimicCard,mimicIdx); div.appendChild(bk);
+  }
+  showAP('Mimic: Select target / 模仿：選擇目標',div);
+}
+
+// Mimic + Detector: also need a guess value
+function showMimicGuessUI(mimicCard,mimicIdx,copiedCard,tid){
+  const div=document.createElement('div');
+  div.innerHTML=`<div class="ttitle">Mimic → Detector: guess value / 模仿偵探：猜測手牌值</div>`;
+  const row=document.createElement('div'); row.className='grow'; let sel=null;
+  [0,2,3,4,5,6,7,8,9,10,11,12,13,14].forEach(v=>{
+    const b=document.createElement('button'); b.className='gbtn'; b.textContent=v;
+    b.onclick=()=>{div.querySelectorAll('.gbtn').forEach(x=>x.classList.remove('sel'));b.classList.add('sel');sel=v;};
+    row.appendChild(b);
+  });
+  div.appendChild(row);
+  const cf=document.createElement('button'); cf.className='btn btn-gold mt8'; cf.style.width='100%'; cf.textContent='Confirm / 確認';
+  cf.onclick=()=>{
+    if(sel===null){toast('Pick a value / 請選擇數值','red');return;}
+    commitPlay({card:mimicCard,idx:mimicIdx,targetId:tid,guessValue:sel,mimicId:copiedCard.id});
+  };
+  div.appendChild(cf); showAP('Mimic → Detector Guess / 模仿偵探猜測',div);
 }
 
 // commitPlay: any player calls this. If host, process directly. If guest, write action to Firebase.
@@ -759,7 +827,8 @@ function processAction({playerId,card,idx,targetId,guessValue,mimicId}){
 
   if(card.value===9&&mimicId!=null){
     const copied=getCard(mimicId);
-    addLog(`${actor.name} mimics ${copied.name}!`,'a');
+    addLog(`${actor.name} mimics ${copied.name} (${copied.value})!`,'a');
+    GS.announce=`🎭 <strong>${actor.name}</strong> plays Mimic → copying <strong>${copied.value} ${copied.icon} ${copied.name}</strong>`;
     resolveEffect(copied,actor.id,targetId,guessValue);
   } else {
     resolveEffect(card,actor.id,targetId,guessValue);
