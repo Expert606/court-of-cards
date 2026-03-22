@@ -702,8 +702,9 @@ function showGuessUI(card,idx,tid){
 }
 
 function showMimicUI(mimicCard,mimicIdx){
-  const ap=[...new Set((GS.discardPile||[]).map(d=>d.value))];
-  if(!ap.length){toast('No discarded cards yet / 尚無棄牌','red');return;}
+  // Mimic cannot copy itself (9) or Prince (13) — Prince would immediately eliminate the player
+  const ap=[...new Set((GS.discardPile||[]).map(d=>d.value))].filter(v=>v!==9&&v!==13);
+  if(!ap.length){toast('No valid cards to copy / 沒有可模仿的牌（排除王子/模仿者）','red');return;}
   const div=document.createElement('div');
   div.innerHTML=`<div class="ttitle">Copy which card? / 模仿哪張牌？</div>`;
   const list=document.createElement('div'); list.className='tlist';
@@ -712,11 +713,9 @@ function showMimicUI(mimicCard,mimicIdx){
     const b=document.createElement('button'); b.className='tbtn';
     b.innerHTML=`<span style="font-family:'Cinzel Decorative',serif;color:var(--gold)">${c.value}</span><span>${c.icon} ${c.name} / ${c.nameCN}</span>`;
     b.onclick=()=>{
-      // Cards that need a target
       if([1,2,3,5,7,10].includes(c.value)){
         showMimicTargetUI(mimicCard,mimicIdx,c);
       } else {
-        // No target needed — commit immediately
         commitPlay({card:mimicCard,idx:mimicIdx,targetId:null,guessValue:null,mimicId:c.id});
       }
     };
@@ -834,7 +833,13 @@ function processAction({playerId,card,idx,targetId,guessValue,mimicId}){
     resolveEffect(card,actor.id,targetId,guessValue);
   }
 
-  writeGS().then(()=>{if(!isOver())setTimeout(advanceTurn,2600);});
+  // Only write + schedule next turn if game isn't over.
+  // resolveEffect may have called declareWinner which already writes and transitions.
+  if(isOver()){
+    writeGS(); // final sync
+    return;
+  }
+  writeGS().then(()=>{ if(!isOver()) setTimeout(advanceTurn,2600); });
 }
 
 function resolveEffect(card,actorId,targetId,guessValue){
@@ -906,12 +911,25 @@ function resolveEffect(card,actorId,targetId,guessValue){
         addLog(`${actor.name} uses Clown.`,'a');
       }
       break;
-    case 7:
+    case 7:{
       if(!target||!target.hand[0]||!actor.hand[0]) break;
       const tmp=actor.hand[0]; actor.hand[0]=target.hand[0]; target.hand[0]=tmp;
       GS.players.forEach(p=>{if(p.hand[0]&&p.hand[0].value===11)GS.revengerId=p.id;});
       GS.announce=`🤝 <strong>${actor.name}</strong> swapped cards with <strong>${target.name}</strong>.`;
-      addLog(`${actor.name} swapped with ${target.name}.`,'a'); break;
+      addLog(`${actor.name} swapped with ${target.name}.`,'a');
+      // Prince rule: if either player now holds Prince after the swap, they are immediately eliminated
+      if(actor.hand[0]&&actor.hand[0].value===13){
+        addLog(`${actor.name} received Prince via Merchant — eliminated!`,'el');
+        GS.announce+=` <span style="color:var(--red2)">${actor.name} received Prince — eliminated!</span>`;
+        elim(actor.id,null);
+      }
+      if(!isOver()&&target.hand[0]&&target.hand[0].value===13){
+        addLog(`${target.name} received Prince via Merchant — eliminated!`,'el');
+        GS.announce+=` <span style="color:var(--red2)">${target.name} received Prince — eliminated!</span>`;
+        elim(target.id,actor.id);
+      }
+      break;
+    }
     case 8:
       GS.direction*=-1;
       GS.announce=`🔮 <strong>${actor.name}</strong> plays Magician — <strong>direction reversed! / 方向逆轉！</strong>`;
@@ -987,15 +1005,25 @@ function aiPlay(player,doAdvance=false){
   if(card.value===13){
     addLog(`${player.name} played Prince — eliminated!`,'el');
     GS.announce=`🤴 <strong>${player.name}</strong> played Prince — <span style="color:var(--red2)">eliminated!</span>`;
-    elim(player.id,null); writeGS().then(()=>{if(doAdvance&&!isOver())setTimeout(advanceTurn,2800);});return;
+    elim(player.id,null);
+    if(isOver()){ writeGS(); return; }
+    writeGS().then(()=>{if(doAdvance&&!isOver())setTimeout(advanceTurn,2800);}); return;
   }
   if(card.value===9){
-    const ap=[...new Set((GS.discardPile||[]).map(d=>d.cardId))];
-    if(ap.length){const mc=getCard(ap[Math.floor(Math.random()*ap.length)]);if(mc.value!==13){const t2=vt[Math.floor(Math.random()*vt.length)];resolveEffect(mc,player.id,t2?t2.id:null,Math.floor(Math.random()*15));}}
+    // Mimic: exclude self (9) and Prince (13) to prevent crashes
+    const ap=[...new Set((GS.discardPile||[]).map(d=>d.value))].filter(v=>v!==9&&v!==13);
+    if(ap.length){
+      const mc=CARDS.find(c=>c.value===ap[Math.floor(Math.random()*ap.length)]);
+      if(mc){
+        const t2=vt[Math.floor(Math.random()*vt.length)];
+        resolveEffect(mc,player.id,t2?t2.id:null,mc.value===1?Math.floor(Math.random()*15):null);
+      }
+    }
   } else {
     resolveEffect(card,player.id,tgt?tgt.id:null,card.value===1?Math.floor(Math.random()*15):null);
   }
-  writeGS().then(()=>{if(doAdvance&&!isOver())setTimeout(advanceTurn,2600);});
+  if(isOver()){ writeGS(); return; }
+  writeGS().then(()=>{if(doAdvance&&!isOver()) setTimeout(advanceTurn,2600);});
 }
 
 // ─── ADVANCE TURN ────────────────────────────────────────────────────────────
