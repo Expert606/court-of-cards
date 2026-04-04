@@ -1387,8 +1387,17 @@ function resolveEffect(card,actorId,targetId,guessValue){
     case 3:
       if(!target||!target.hand[0]||!actor.hand[0])break;
       const av=actor.hand[0].value,tv=target.hand[0].value;
-      GS.announce=`🥊 <strong>${actor.name}</strong>(${av}) vs <strong>${target.name}</strong>(${tv}) — ${av<tv?`<span style="color:var(--red2)">${actor.name} eliminated!</span>`:tv<av?`<span style="color:var(--red2)">${target.name} eliminated!</span>`:'Tie!'}`;
-      addLog(`Fighter: ${actor.name}(${av}) vs ${target.name}(${tv})`,'a');
+      const fightResult=av<tv?`${actor.name} eliminated!`:tv<av?`${target.name} eliminated!`:'Tie!';
+      // Public: no card values shown
+      GS.announce=`🥊 <strong>${actor.name}</strong> vs <strong>${target.name}</strong> — <span style="color:var(--red2)">${fightResult}</span>`;
+      addLog(`Fighter: ${actor.name} vs ${target.name} — ${fightResult}`,'a');
+      // Private: only the two fighters see the actual values
+      if(actorId===myId||targetId===myId){
+        pendingPrivate={title:'Fighter Result / 戰士結果',body:`You: ${actorId===myId?av:tv}
+${actorId===myId?target.name:actor.name}: ${actorId===myId?tv:av}
+
+→ ${fightResult}`};
+      }
       if(av<tv)elim(actorId,targetId);else if(tv<av)elim(targetId,actorId);else addLog('Tie!','a');
       break;
     case 4:
@@ -1513,12 +1522,32 @@ function aiPlay(player,doAdvance=false){
     writeGS().then(()=>{if(doAdvance&&!isOver())setTimeout(advanceTurn,2800);});return;
   }
   if(card.value===9){
+    // Collect copyable discard values — exclude Mimic(9) and Prince(13)
     const ap=[...new Set((GS.discardPile||[]).map(d=>d.value))].filter(v=>v!==9&&v!==13);
-    if(ap.length){
+    if(!ap.length){
+      // Nothing to copy — announce clearly so everyone knows
+      GS.announce=`🎭 <strong style="color:var(--cyan)">${player.name}</strong> plays Mimic — <span style="color:var(--text3)">no valid card to copy, no effect.</span>`;
+      addLog(`${player.name} plays Mimic — no valid card in discard, no effect.`,'a');
+    }else{
       const mc=CARDS.find(c=>c.value===ap[Math.floor(Math.random()*ap.length)]);
       if(mc){
-        const t2=vt[Math.floor(Math.random()*vt.length)];
-        resolveEffect(mc,player.id,t2?t2.id:null,mc.value===1?Math.floor(Math.random()*15):null);
+        // For Shooter include self as possible target; others respect protection
+        const needsTarget=[1,2,3,5,7,10].includes(mc.value);
+        const allLiving=(GS.players||[]).filter(p=>!p.eliminated&&p.id!==player.id);
+        const vtForMimic=mc.value===5
+          ? (GS.players||[]).filter(p=>!p.eliminated)
+          : allLiving.filter(p=>!p.protected);
+        const t2=vtForMimic[Math.floor(Math.random()*vtForMimic.length)];
+        // Build clear announce so everyone sees what Mimic copied and who it targets
+        let mimicAnn=`🎭 <strong style="color:var(--cyan)">${player.name}</strong> plays Mimic → copies <strong>${mc.value} ${mc.icon} ${mc.name}</strong>`;
+        if(needsTarget&&t2) mimicAnn+=` → targeting <strong>${t2.name}</strong>`;
+        if(needsTarget&&!t2) mimicAnn+=` <span style="color:var(--text3)">(no valid target — no effect)</span>`;
+        GS.announce=mimicAnn;
+        addLog(`${player.name} mimics ${mc.name}(${mc.value})${(needsTarget&&t2)?' → '+t2.name:''}.`,'a');
+        // Only call resolveEffect when we actually have what we need
+        if(!needsTarget||t2){
+          resolveEffect(mc,player.id,t2?t2.id:null,mc.value===1?Math.floor(Math.random()*15):null);
+        }
       }
     }
   }else{resolveEffect(card,player.id,tgt?tgt.id:null,card.value===1?Math.floor(Math.random()*15):null);}
