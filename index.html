@@ -1499,7 +1499,7 @@ function resolveEffect(card,actorId,targetId,guessValue){
       addLog(`Fighter: ${actor.name} vs ${target.name} — ${fightResult}`,'a');
       // Private: only the two fighters see the actual values
       queuePrivateNotice(actorId,'Fighter Result / 戰士結果',`You: ${av}\n${target.name}: ${tv}\n\n→ ${fightResult}`);
-      queuePrivateNotice(targetId,'Fighter Result / 戰士結果',`You: ${tv}\n${actor.name}: ${av}\n\n→ ${fightResult}`);}
+      queuePrivateNotice(targetId,'Fighter Result / 戰士結果',`You: ${tv}\n${actor.name}: ${av}\n\n→ ${fightResult}`);
       if(av<tv)elim(actorId,targetId);else if(tv<av)elim(targetId,actorId);else addLog('Tie!','a');
       break;
     case 4:
