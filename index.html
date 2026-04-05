@@ -962,11 +962,28 @@ function queuePrivateNotice(pid,title,body){
 }
 
 // ─── FIREBASE STATUS ────────────────────────────────────────────────────────
+// Firebase connection monitor — shows error after 10s if still not connected
+let _fbConnected=false;
+const _fbTimeout=setTimeout(()=>{
+  if(!_fbConnected){
+    const el=document.getElementById('fbstat');
+    el.className='status-bar err tc';
+    document.getElementById('fbstatTxt').textContent='Connection failed — check network / 連線失敗，請檢查網路';
+    document.querySelector('.btn-primary').disabled=true;
+    document.querySelector('.btn-secondary').disabled=true;
+  }
+},10000);
 onValue(ref(db,'.info/connected'),snap=>{
   const ok=snap.val();
+  _fbConnected=!!ok;
   const el=document.getElementById('fbstat');
   el.className='status-bar '+(ok?'con':'wait')+' tc';
   document.getElementById('fbstatTxt').textContent=ok?'Connected / 已連線':'Connecting... / 連線中...';
+  if(ok){
+    clearTimeout(_fbTimeout);
+    // Re-enable buttons if they were disabled by timeout
+    document.querySelectorAll('.btn-primary,.btn-secondary').forEach(b=>b.disabled=false);
+  }
 });
 
 // ─── ROOM MANAGEMENT ────────────────────────────────────────────────────────
@@ -974,11 +991,18 @@ window.createRoom=async()=>{
   const name=validateName();if(!name)return;
   myName=name;isHost=true;roomCode=randCode();myId=0;
   showNet('Creating room...');
-  const roomRef=ref(db,`rooms/${roomCode}`);
-  await set(roomRef,{host:0,phase:'waiting',players:[{name,id:0,isAI:false,online:true}],createdAt:Date.now()});
-  onDisconnect(roomRef).remove();
-  document.getElementById('rcdisplay').textContent=roomCode;
-  listenRoom();hideNet();showScreen('waiting');
+  try{
+    const roomRef=ref(db,`rooms/${roomCode}`);
+    await set(roomRef,{host:0,phase:'waiting',players:[{name,id:0,isAI:false,online:true}],createdAt:Date.now()});
+    onDisconnect(roomRef).remove();
+    document.getElementById('rcdisplay').textContent=roomCode;
+    listenRoom();hideNet();showScreen('waiting');
+  }catch(err){
+    hideNet();
+    isHost=false;roomCode='';myId=null;
+    console.error('createRoom failed',err);
+    toast('Could not create room. Check your connection. / 無法建立房間，請檢查網路。','red');
+  }
 };
 
 window.joinRoom=async()=>{
@@ -986,23 +1010,32 @@ window.joinRoom=async()=>{
   const code=document.getElementById('rcIn').value.trim();
   if(!/^\d{4}$/.test(code)){toast('Enter a 4-digit code / 請輸入4位數字','red');return;}
   showNet('Joining...');
-  const roomRef=ref(db,`rooms/${code}`);
-  const snap=await get(roomRef);
-  if(!snap.exists()){hideNet();toast('Room not found / 找不到房間','red');return;}
-  const data=snap.val();
-  if(data.phase!=='waiting'){hideNet();toast('Game already started / 遊戲已開始','red');return;}
-  const players=data.players||[];
-  if(players.length>=8){hideNet();toast('Room full / 房間已滿','red');return;}
-  myName=name;isHost=false;roomCode=code;myId=players.length;
-  const newPlayers=[...players,{name,id:myId,isAI:false,online:true}];
-  await update(roomRef,{players:newPlayers});
-  document.getElementById('rcdisplay').textContent=roomCode;
-  listenRoom();hideNet();showScreen('waiting');
+  try{
+    const roomRef=ref(db,`rooms/${code}`);
+    const snap=await get(roomRef);
+    if(!snap.exists()){hideNet();toast('Room not found / 找不到房間','red');return;}
+    const data=snap.val();
+    if(data.phase!=='waiting'){hideNet();toast('Game already started / 遊戲已開始','red');return;}
+    const players=data.players||[];
+    if(players.length>=8){hideNet();toast('Room full / 房間已滿','red');return;}
+    myName=name;isHost=false;roomCode=code;myId=players.length;
+    const newPlayers=[...players,{name,id:myId,isAI:false,online:true}];
+    await update(roomRef,{players:newPlayers});
+    document.getElementById('rcdisplay').textContent=roomCode;
+    listenRoom();hideNet();showScreen('waiting');
+  }catch(err){
+    hideNet();
+    roomCode='';myId=null;
+    console.error('joinRoom failed',err);
+    toast('Could not join room. Check your connection. / 無法加入房間，請檢查網路。','red');
+  }
 };
 
 window.addAI=async()=>{
   if(!isHost){toast('Only host can add AI','red');return;}
-  const snap=await get(ref(db,`rooms/${roomCode}/players`));
+  let snap;
+  try{snap=await get(ref(db,`rooms/${roomCode}/players`));}
+  catch(err){toast('Failed to add AI — check connection.','red');return;}
   const players=snap.val()||[];
   if(players.length>=8){toast('Room full','red');return;}
   const names=['Alice','Bob','Carol','Dave','Eve','Frank','Grace','Hank'];
@@ -1055,7 +1088,9 @@ function renderWait(players){
 // ─── START GAME ─────────────────────────────────────────────────────────────
 window.hostStart=async()=>{
   if(!isHost)return;
-  const snap=await get(ref(db,`rooms/${roomCode}/players`));
+  let snap;
+  try{snap=await get(ref(db,`rooms/${roomCode}/players`));}
+  catch(err){toast('Failed to start — check connection. / 無法開始，請檢查網路。','red');console.error('hostStart get failed',err);return;}
   const players=(snap.val()||[]).map(p=>({...p,eliminated:false,protected:false,hand:[],mustFirst:false}));
   if(players.length<3){toast('Need at least 3 players','red');return;}
   const deck=buildDeck();
