@@ -856,7 +856,7 @@ body::after{
 <!-- ══════════════ FIREBASE + GAME LOGIC ══════════════ -->
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-import { getDatabase, ref, set, get, update, onValue, off, remove, onDisconnect }
+import { getDatabase, ref, set, get, update, onValue, off, remove }
   from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
 
 const firebaseConfig = {
@@ -894,9 +894,12 @@ const getCard=id=>CARDS.find(c=>c.id===id);
 
 // ─── STATE ──────────────────────────────────────────────────────────────────
 let myName='',myId=null,roomCode='',isHost=false;
-let unsubRoom=null,unsubGame=null;
+let unsubRoom=null,unsubGame=null,unsubPendingAction=null;
 let GS={};
 let pendingPrivate=null;
+let lastPrivateNoticeId=null;
+let selfCheckTimer=null;
+const SELF_CHECK={lastProgressAt:Date.now(),lastSig:'',warned:false,lastReport:''};
 
 // ─── UTILS ──────────────────────────────────────────────────────────────────
 const shuffle=a=>{const b=[...a];for(let i=b.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[b[i],b[j]]=[b[j],b[i]];}return b;};
@@ -911,6 +914,48 @@ const hideNet=()=>document.getElementById('netOverlay').classList.remove('show')
 const validateName=()=>{const n=document.getElementById('nameIn').value.trim();if(!n){toast('Enter your name / 請輸入名稱','red');return null;}return n;};
 
 // ─── FIREBASE STATUS ────────────────────────────────────────────────────────
+function buildSelfCheckSig(){
+  const logs=(GS.log||[]).length;
+  const deck=(GS.deck||[]).length;
+  const phase=GS.phase||'none';
+  const turn=GS.currentPlayerIdx??'x';
+  const hands=(GS.players||[]).map(p=>`${p.id}:${p.eliminated?'x':(p.hand||[]).length}`).join('|');
+  return `${phase}/${turn}/${deck}/${logs}/${hands}`;
+}
+function markProgress(reason='state-change'){
+  SELF_CHECK.lastProgressAt=Date.now();
+  SELF_CHECK.warned=false;
+  SELF_CHECK.lastReport=reason;
+}
+function runSelfCheck(){
+  if(!roomCode||!GS||!GS.players)return;
+  const sig=buildSelfCheckSig();
+  if(sig!==SELF_CHECK.lastSig){
+    SELF_CHECK.lastSig=sig;
+    markProgress('game-state-updated');
+  }
+  const idleMs=Date.now()-SELF_CHECK.lastProgressAt;
+  const current=(GS.players||[])[GS.currentPlayerIdx];
+  const problems=[];
+  if(!navigator.onLine)problems.push('browser offline');
+  if((GS.phase==='play'||GS.phase==='final')&&idleMs>15000)problems.push(`no state change for ${Math.round(idleMs/1000)}s`);
+  if(GS.phase==='play'&&!current)problems.push('current player missing');
+  if(GS.phase==='play'&&current&&current.eliminated)problems.push('turn points to eliminated player');
+  if(GS.phase==='play'&&isHost&&current&&!current.isAI&&!(current.hand||[]).length)problems.push('human turn started with empty hand');
+  if(problems.length&&!SELF_CHECK.warned){
+    const report=`Self-check warning: ${problems.join(', ')}. Host-driven sync may be stalled.`;
+    SELF_CHECK.warned=true;
+    SELF_CHECK.lastReport=report;
+    console.warn(report,{roomCode,isHost,phase:GS.phase,currentPlayerIdx:GS.currentPlayerIdx,deck:(GS.deck||[]).length});
+    ann(`<span style="color:var(--yellow)">${report}</span>`);
+  }
+  window.__gameSelfCheck={roomCode,isHost,phase:GS.phase,currentPlayerIdx:GS.currentPlayerIdx,lastProgressAt:SELF_CHECK.lastProgressAt,idleMs,lastReport:SELF_CHECK.lastReport,warned:SELF_CHECK.warned};
+}
+function startSelfCheck(){
+  if(selfCheckTimer)clearInterval(selfCheckTimer);
+  markProgress('self-check-started');
+  selfCheckTimer=setInterval(runSelfCheck,5000);
+}
 onValue(ref(db,'.info/connected'),snap=>{
   const ok=snap.val();
   const el=document.getElementById('fbstat');
@@ -925,7 +970,6 @@ window.createRoom=async()=>{
   showNet('Creating room...');
   const roomRef=ref(db,`rooms/${roomCode}`);
   await set(roomRef,{host:0,phase:'waiting',players:[{name,id:0,isAI:false,online:true}],createdAt:Date.now()});
-  onDisconnect(roomRef).remove();
   document.getElementById('rcdisplay').textContent=roomCode;
   listenRoom();hideNet();showScreen('waiting');
 };
@@ -962,7 +1006,8 @@ window.addAI=async()=>{
 };
 
 window.leaveRoom=async()=>{
-  if(unsubRoom)unsubRoom();if(unsubGame)unsubGame();
+  if(unsubRoom)unsubRoom();if(unsubGame)unsubGame();if(unsubPendingAction)unsubPendingAction();
+  if(selfCheckTimer)clearInterval(selfCheckTimer);
   if(isHost&&roomCode)await remove(ref(db,`rooms/${roomCode}`));
   roomCode='';myId=null;isHost=false;GS={};showScreen('lobby');
 };
@@ -1012,7 +1057,7 @@ window.hostStart=async()=>{
   players.forEach(p=>{if(p.hand[0]&&p.hand[0].value===11)revengerId=p.id;});
   const gameState={
     players,deck,discardPile:[],currentPlayerIdx:0,direction:1,phase:'play',
-    sevenPlayed:false,elevenPlayed:false,revengerId,generalTargets:{},
+    sevenPlayed:false,elevenPlayed:false,revengerId,generalTargets:{},privateNotice:{},
     announce:'Game started! / 遊戲開始！',log:[],turn:0,
   };
   await set(ref(db,`rooms/${roomCode}/game`),gameState);
@@ -1021,6 +1066,7 @@ window.hostStart=async()=>{
   renderCardRef();showScreen('game');
   document.getElementById('logPanel').style.display='block';
   GS=gameState;
+  startSelfCheck();
   log('=== Game Started ===','s');
   beginTurn();
 };
@@ -1035,6 +1081,7 @@ function startListeningGame(){
   unsubGame=onValue(gameRef,snap=>{
     if(!snap.exists())return;
     GS=snap.val();
+    startSelfCheck();
     renderGame();
     const logs=GS.log||[];
     const shown=document.getElementById('lents').children.length;
@@ -1047,7 +1094,13 @@ function startListeningGame(){
         renderHand();showAP('Select a card to play','<div class="tc dim" style="font-size:12px;letter-spacing:1px">Hover for abilities · Click to select</div>');
       }
     }
-    if(pendingPrivate){const{title,body}=pendingPrivate;pendingPrivate=null;setTimeout(()=>showModal(title,body),300);}
+    const notice=GS.privateNotice&&GS.privateNotice[myId];
+    if(notice&&notice.id!==lastPrivateNoticeId){
+      lastPrivateNoticeId=notice.id;
+      setTimeout(()=>showModal(notice.title,notice.body),300);
+    }else if(pendingPrivate){
+      const{title,body}=pendingPrivate;pendingPrivate=null;setTimeout(()=>showModal(title,body),300);
+    }
     if(GS.phase==='ended'&&!document.getElementById('winscreen').classList.contains('active')){
       setTimeout(()=>renderWinScreen(),1000);
     }
@@ -1056,7 +1109,19 @@ function startListeningGame(){
 
 async function writeGS(extra={}){
   if(!isHost)return;
-  await set(ref(db,`rooms/${roomCode}/game`),{...GS,...extra});
+  try{
+    await set(ref(db,`rooms/${roomCode}/game`),{...GS,...extra});
+    markProgress('writeGS-ok');
+  }catch(err){
+    console.error('writeGS failed',err);
+    toast('Sync error. Retrying on next action.','red');
+    ann('<span style="color:var(--red2)">Connection issue while syncing the game state.</span>');
+  }
+}
+function queuePrivateNotice(pid,title,body){
+  if(pid==null)return;
+  GS.privateNotice=GS.privateNotice||{};
+  GS.privateNotice[pid]={id:`${Date.now()}-${Math.random().toString(36).slice(2,8)}`,title,body};
 }
 function addLog(m,t='a'){GS.log=GS.log||[];GS.log.push({m,t});if(GS.log.length>100)GS.log=GS.log.slice(-100);}
 
@@ -1254,7 +1319,18 @@ function showGuessUI(card,idx,tid){
 
 function showMimicUI(mimicCard,mimicIdx){
   const ap=[...new Set((GS.discardPile||[]).map(d=>d.value))].filter(v=>v!==9&&v!==13);
-  if(!ap.length){toast('No valid cards to copy','red');return;}
+  if(!ap.length){
+    const div=document.createElement('div');
+    div.innerHTML=`<div class="target-title">No valid card to copy</div>
+      <div class="tc dim" style="font-size:12px;margin-bottom:10px;letter-spacing:1px">Mimic will be played with no effect.</div>`;
+    const cf=document.createElement('button');cf.className='btn btn-primary';cf.style.width='100%';cf.textContent='Play Mimic';
+    cf.onclick=()=>commitPlay({card:mimicCard,idx:mimicIdx,targetId:null,guessValue:null,mimicId:null});
+    div.appendChild(cf);
+    const bk=document.createElement('button');bk.className='btn btn-secondary btn-sm mt8';bk.textContent='Back';
+    bk.onclick=()=>pickCard(mimicIdx);div.appendChild(bk);
+    showAP('Mimic',div);
+    return;
+  }
   const div=document.createElement('div');
   div.innerHTML=`<div class="target-title">Copy which card? / 模仿哪張？</div>`;
   const list=document.createElement('div');list.className='target-list';
@@ -1661,6 +1737,58 @@ function listenForGuestActions(){
     }
   });
 }
+window.commitPlay=({card,idx,targetId,guessValue,mimicId})=>{
+  hideAP();selectedCardIdx=null;
+  if(isHost){processAction({playerId:myId,card,idx,targetId,guessValue,mimicId});}
+  else{
+    set(ref(db,`rooms/${roomCode}/pendingAction`),{playerId:myId,card,idx,targetId:targetId??null,guessValue:guessValue??null,mimicId:mimicId??null,ts:Date.now()})
+      .then(()=>{markProgress('pending-action-sent');ann('??Processing...');})
+      .catch(err=>{console.error('pendingAction failed',err);toast('Could not send action to host.','red');ann('<span style="color:var(--red2)">Action failed to send. Please try again.</span>');});
+  }
+};
+const _baseProcessAction=processAction;
+processAction=function({playerId,card,idx,targetId,guessValue,mimicId}){
+  if(!isHost)return;
+  if(GS.currentPlayerIdx!==playerId||GS.phase!=='play')return;
+  return _baseProcessAction({playerId,card,idx,targetId,guessValue,mimicId});
+};
+const _baseResolveEffect=resolveEffect;
+resolveEffect=function(card,actorId,targetId,guessValue){
+  const actor=(GS.players||[]).find(p=>p.id===actorId);
+  const target=targetId!=null?(GS.players||[]).find(p=>p.id===targetId):null;
+  let actorNotice=null,targetNotice=null;
+  if(card.value===1&&target&&target.hand&&target.hand[0]&&target.hand[0].value!==14){
+    const hit=target.hand[0].value===guessValue;
+    actorNotice={title:'Detector Result',body:hit?`??Correct! ${target.name} eliminated.`:`??Wrong guess!`};
+  }
+  if(card.value===2&&target&&target.hand&&target.hand[0]&&target.hand[0].value!==14){
+    const c=target.hand[0];
+    actorNotice={title:'Police Result',body:`${target.name}'s card:\n${c.value} ??${c.icon} ${c.name} / ${c.nameCN}`};
+  }
+  if(card.value===3&&actor&&target&&actor.hand&&actor.hand[0]&&target.hand&&target.hand[0]){
+    const av=actor.hand[0].value,tv=target.hand[0].value;
+    const fightResult=av<tv?`${actor.name} eliminated!`:tv<av?`${target.name} eliminated!`:'Tie!';
+    actorNotice={title:'Fighter Result / ?啣ㄚ蝯?',body:`You: ${av}\n${target.name}: ${tv}\n\n??${fightResult}`};
+    targetNotice={title:'Fighter Result / ?啣ㄚ蝯?',body:`You: ${tv}\n${actor.name}: ${av}\n\n??${fightResult}`};
+  }
+  const result=_baseResolveEffect(card,actorId,targetId,guessValue);
+  if(actorNotice)queuePrivateNotice(actorId,actorNotice.title,actorNotice.body);
+  if(targetNotice)queuePrivateNotice(targetId,targetNotice.title,targetNotice.body);
+  return result;
+};
+const _baseListenForGuestActions=listenForGuestActions;
+listenForGuestActions=function(){
+  if(unsubPendingAction)unsubPendingAction();
+  if(!isHost)return;
+  unsubPendingAction=onValue(ref(db,`rooms/${roomCode}/pendingAction`),snap=>{
+    if(!snap.exists())return;
+    const a=snap.val();if(!a||!a.card)return;
+    if(GS.currentPlayerIdx===a.playerId&&GS.phase==='play'){
+      remove(ref(db,`rooms/${roomCode}/pendingAction`));processAction(a);
+    }
+  });
+};
+window.backLobby=()=>{if(unsubRoom)unsubRoom();if(unsubGame)unsubGame();if(unsubPendingAction)unsubPendingAction();if(selfCheckTimer)clearInterval(selfCheckTimer);if(isHost&&roomCode)remove(ref(db,`rooms/${roomCode}`));roomCode='';myId=null;isHost=false;GS={};showScreen('lobby');}
 const _origHostStart=window.hostStart;
 window.hostStart=async()=>{await _origHostStart();listenForGuestActions();};
 </script>
